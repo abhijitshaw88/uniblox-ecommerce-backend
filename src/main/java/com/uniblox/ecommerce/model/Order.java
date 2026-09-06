@@ -33,6 +33,7 @@ public class Order {
 
     private String couponCode;
 
+    @Builder.Default
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
     private OrderStatus status = OrderStatus.SUCCESS;

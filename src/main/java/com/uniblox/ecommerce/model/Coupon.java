@@ -25,6 +25,7 @@ public class Coupon {
     @Column(nullable = false, precision = 5, scale = 2)
     private BigDecimal discountPercentage;
 
+    @Builder.Default
     @Column(nullable = false)
     private Boolean isRedeemed = false;
 
