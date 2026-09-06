@@ -1,56 +1,127 @@
-# Ecommerce Backend Implementation Plan
+# Ecommerce Backend Implementation Plan & Analysis
 
-We will build the ecommerce backend using Java 21, Spring Boot, Spring Data JPA, and an H2 in-memory database to fulfill the assignment requirements.
+This document synthesizes the requirements from `README.md` and provides a complete architectural design and implementation plan.
 
-## User Review Required
-Please review the proposed API design and data model below. Specifically, the concurrency and idempotency strategies are critical for this assignment.
+---
 
-## Open Questions
-1. **Money Representation**: I propose using `BigDecimal` for all currency calculations to prevent floating-point errors. Does this sound good?
-2. **Idempotency Strategy for Checkout**: I propose using an `idempotency_key` header provided by the client during checkout. The system will store this key. If a retry happens with the same key, it will return the existing order rather than creating a new one.
+## Requirements Analysis & Invariants
 
-## Proposed Changes
+Based on `README.md`, our system must guarantee the following critical invariants:
 
-### 1. Data Model
-We will use JPA entities for the following tables:
-- `Product`: `id`, `name`, `price`, `available_inventory`
-- `Cart`: `id`
-- `CartItem`: `id`, `cart_id`, `product_id`, `quantity` (Note: we fetch the latest price dynamically during checkout and cart view to handle price changes).
-- `Order`: `id`, `cart_id`, `gross_total`, `discount_amount`, `net_total`, `coupon_id`
-- `OrderItem`: `id`, `order_id`, `product_id`, `quantity`, `price_at_purchase`
-- `Coupon`: `id`, `code`, `discount_percentage`, `is_redeemed`, `milestone_index`
-- `IdempotencyKey`: `key`, `order_id` (To prevent duplicate checkouts)
+1. **Inventory Invariant**: Available inventory must never fall below zero (`available_inventory >= 0`), even under high concurrency.
+2. **Cart Invariant**: A cart can only be checked out once (`status == OPEN -> CHECKED_OUT`). Modifying a checked-out cart is forbidden.
+3. **Idempotency Invariant**: Retried checkout requests with the same `Idempotency-Key` must return the exact existing order result without double-charging inventory or applying discounts twice.
+4. **Coupon Invariant**: 
+   - A coupon can only be redeemed once.
+   - A coupon is never marked as redeemed if the checkout transaction fails/rolls back.
+   - A coupon milestone (every $n^{\text{th}}$ order) generates at most one coupon.
+   - Discount amount must be deterministic and can never make the order total negative (`net_total >= 0`).
+5. **Money Accuracy Invariant**: All monetary values must use `BigDecimal` with 2 decimal places (`HALF_UP` rounding mode) to prevent floating-point inaccuracies.
+6. **Reporting Reconciliation**: Admin reporting must be read-only and dynamically reconcile with existing `Order`, `OrderItem`, and `Coupon` records.
 
-### 2. Concurrency & Inventory Control
-- **Database Locks**: We will use pessimistic locking (`@Lock(LockModeType.PESSIMISTIC_WRITE)`) on the `Product` entity when a checkout occurs. This ensures that concurrent checkouts for the same product do not oversell inventory.
-- **Coupons**: Pessimistic locking will also be used on the `Coupon` entity during checkout to ensure a single coupon cannot be redeemed by two concurrent threads.
+---
 
-### 3. API Endpoints
-**Cart API:**
-- `POST /carts` - Create a new cart.
-- `GET /carts/{id}` - View cart, including dynamic total calculation based on current prices.
-- `POST /carts/{id}/items` - Add product.
-- `PUT /carts/{id}/items/{productId}` - Update quantity.
-- `DELETE /carts/{id}/items/{productId}` - Remove item.
+## Detailed Component Design
 
-**Checkout API:**
-- `POST /checkout` - Expects `{ "cartId": 1, "couponCode": "DISC10" }` and an `Idempotency-Key` header. Validates inventory, creates `Order`, applies discount, deducts inventory, and marks coupon as used.
+### 1. Data Model (JPA Entities)
 
-**Admin API:**
-- `POST /admin/coupons/generate` - Checks if total successful orders modulo `n` == 0 and generates a coupon for that milestone.
-- `GET /admin/report` - Returns metrics by aggregating `Order` and `OrderItem` data.
+- **`Product`**: `id` (Long), `name` (String), `price` (BigDecimal), `availableInventory` (Integer), `version` (Long for optimistic lock fallback, though pessimistic lock will be used during checkout).
+- **`Cart`**: `id` (Long), `status` (Enum: `OPEN`, `CHECKED_OUT`), `createdAt` (LocalDateTime).
+- **`CartItem`**: `id` (Long), `cartId` (Long), `productId` (Long), `quantity` (Integer).
+- **`Order`**: `id` (Long), `cartId` (Long), `grossTotal` (BigDecimal), `discountAmount` (BigDecimal), `netTotal` (BigDecimal), `couponCode` (String), `status` (Enum: `SUCCESS`), `createdAt` (LocalDateTime).
+- **`OrderItem`**: `id` (Long), `orderId` (Long), `productId` (Long), `productName` (String), `unitPrice` (BigDecimal), `quantity` (Integer), `lineTotal` (BigDecimal).
+- **`Coupon`**: `id` (Long), `code` (String), `discountPercentage` (BigDecimal), `isRedeemed` (Boolean), `milestoneOrderNumber` (Long), `createdAt` (LocalDateTime).
+- **`IdempotencyRecord`**: `key` (String, PK), `orderId` (Long), `responseBody` (String), `createdAt` (LocalDateTime).
 
-### 4. Milestone Tracking
-We will maintain a simple configuration or calculate the milestone dynamically by counting total successful orders.
+---
 
-## Verification Plan
+### 2. Concurrency & Transaction Strategy
 
-### Automated Tests
-We will write JUnit 5 and Spring Boot Test integration tests:
-- **Happy Paths**: Cart lifecycle, checkout, coupon generation.
-- **Concurrency Tests**: Use `ExecutorService` to fire multiple simultaneous checkout requests for the same cart/coupon/product to ensure inventory isn't oversold and coupons aren't double-redeemed.
-- **Idempotency Tests**: Fire the same checkout request with the same idempotency key twice to ensure only one order is created.
+- **Inventory Deduct Locking**: When checking out, product records are retrieved using pessimistic write locks (`@Lock(LockModeType.PESSIMISTIC_WRITE)`). This forces concurrent transactions attempting to check out the same product to queue up, eliminating race conditions on inventory deduction.
+- **Coupon Redemption Locking**: During checkout with a coupon, the coupon row is locked via `@Lock(LockModeType.PESSIMISTIC_WRITE)`. If `isRedeemed` is `true`, transaction aborts.
+- **Atomic Transactions**: The `@Transactional` boundary covers the entire checkout process (inventory validation, coupon redemption, order creation, idempotency key registration). Any failure (e.g. out of stock) rolls back the whole transaction, ensuring coupons are not lost or consumed on failure.
+- **Idempotency Locking**: A database unique constraint on `IdempotencyRecord.key` guarantees that parallel requests with the same idempotency key are safely handled (one succeeds, the other catches a duplicate key constraint and fetches the created order).
 
-### Manual Verification
-- Run the Spring Boot application and manually test endpoints using `curl` or Postman.
-- Verify `DECISIONS.md` is populated accurately.
+---
+
+### 3. API Contract Specifications
+
+#### **Cart Operations**
+- `POST /api/carts`: Creates a new cart. Returns `201 Created`.
+- `GET /api/carts/{id}`: Returns cart details with live prices, individual item line totals, and overall total.
+- `POST /api/carts/{id}/items`: Adds item `{ productId, quantity }`. Validates product existence and quantity > 0.
+- `PUT /api/carts/{id}/items/{productId}`: Updates quantity `{ quantity }`. If quantity is 0, removes item.
+- `DELETE /api/carts/{id}/items/{productId}`: Removes item from cart.
+
+#### **Checkout Operations**
+- `POST /api/checkout`:
+  - **Headers**: `X-Idempotency-Key` (String, required for idempotency).
+  - **Body**: `{ "cartId": 1, "couponCode": "DISC10" }`
+  - **Returns**: `200 OK` with order details, or `400/409/422` with structured error details (`ErrorCode`, `message`).
+
+#### **Order Operations**
+- `GET /api/orders/{id}`: Retrieves order details by ID.
+
+#### **Admin Operations**
+- `POST /api/admin/coupons/generate`: Checks if an unrewarded milestone ($n^{\text{th}}$ order) is reached. If eligible, generates a coupon. Returns `201 Created` with coupon or `400 Bad Request` if no milestone eligible.
+- `GET /api/admin/reports/summary`: Returns current analytics summary:
+  - `purchasedQuantityByProduct`: Map of product name to total units sold.
+  - `grossRevenue`, `totalDiscountsGranted`, `netRevenue`.
+  - `couponsGenerated`, `couponsAvailable`, `couponsRedeemed`.
+  - `totalPlacedOrders`.
+
+---
+
+### 4. Configuration & Seed Data
+
+- Application configuration properties:
+  - `app.coupon.milestone-n=5` (Every 5th order triggers a coupon milestone)
+  - `app.coupon.discount-percentage-x=10.0` (10% discount)
+- Startup Data Seeder (`DataInitializer`):
+  - Seeds 5 products (e.g., Laptop [Qty: 10], Smartphone [Qty: 2], Headphones [Qty: 50], Keyboard [Qty: 1], Mouse [Qty: 100]).
+
+---
+
+### 5. `DECISIONS.md` Documentation Structure
+
+We will populate `DECISIONS.md` covering:
+1. **System Invariants**: Detailed list of non-negotiable correctness rules.
+2. **Ambiguities & Trade-offs**: Price change strategy, payment abstraction choice, milestone index handling.
+3. **Five Material Decisions**:
+   - Decision 1: Pessimistic Locking vs Optimistic Locking for Inventory.
+   - Decision 2: Idempotency Key Storage & Strategy.
+   - Decision 3: Dynamic Cart Pricing vs Snapshot Cart Pricing.
+   - Decision 4: Money Handling (`BigDecimal` scale and rounding).
+   - Decision 5: Coupon Milestone Generation Semantics (Manual Admin Trigger vs Auto-generation).
+4. **Transaction & Concurrency Strategy**.
+5. **AI Usage & Corrections**.
+6. **Future Scalability** (Distributed locks with Redis, DB partitioning, Async processing).
+7. **First 2 Hours Next Steps**.
+
+---
+
+## Verification & Testing Strategy
+
+1. **Unit Tests**:
+   - `CartServiceTest`: Validation of item additions, quantity modifications, invalid inputs.
+   - `CouponServiceTest`: Milestone logic, discount calculations, edge cases (discount > subtotal).
+
+2. **Integration & Concurrency Tests**:
+   - `CheckoutConcurrencyTest`: Spawns 10 concurrent threads attempting to check out a product with only 2 items in stock. Verifies exactly 2 succeed and 8 fail cleanly without negative stock.
+   - `CouponConcurrencyTest`: Spawns concurrent requests trying to redeem the same coupon code. Verifies exactly 1 succeeds.
+   - `IdempotencyTest`: Fires multiple simultaneous or sequential checkouts with the same `X-Idempotency-Key`. Verifies only 1 order is created and identical responses are returned.
+
+---
+
+## Execution Plan Roadmap
+
+- [x] Initial Spring Boot setup & GitHub remote repository creation
+- [x] Project structure re-organization & documentation sync
+- [ ] **Step 1**: Create JPA Entities, Enums & Repositories with custom pessimistic lock queries
+- [ ] **Step 2**: Implement DTOs, Custom Exceptions, and Global Exception Handler
+- [ ] **Step 3**: Implement Core Services (`CartService`, `CheckoutService`, `CouponService`, `AdminService`)
+- [ ] **Step 4**: Implement REST Controllers & OpenAPI / API documentation
+- [ ] **Step 5**: Write Data Seeder (`DataInitializer`)
+- [ ] **Step 6**: Develop Concurrency & Idempotency Integration Tests
+- [ ] **Step 7**: Create `DECISIONS.md` with complete rationale & AI log reflection
+- [ ] **Step 8**: Commit, push, and verify everything builds cleanly (`mvnw clean test`)
