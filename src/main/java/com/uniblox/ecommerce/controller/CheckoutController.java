@@ -6,6 +6,7 @@ import com.uniblox.ecommerce.exception.BadRequestException;
 import com.uniblox.ecommerce.service.CheckoutService;
 import com.uniblox.ecommerce.exception.TooManyRequestsException;
 import io.github.resilience4j.ratelimiter.annotation.RateLimiter;
+import io.github.resilience4j.ratelimiter.RequestNotPermitted;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
@@ -30,7 +31,7 @@ public class CheckoutController {
         return checkoutService.checkout(request, idempotencyKey);
     }
 
-    public OrderResponse checkoutRateLimitFallback(String idempotencyKey, CheckoutRequest request, Throwable t) {
+    public OrderResponse checkoutRateLimitFallback(String idempotencyKey, CheckoutRequest request, RequestNotPermitted t) {
         throw new TooManyRequestsException("Checkout rate limit exceeded. Please try again in a few seconds.");
     }
 }
