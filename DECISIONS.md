@@ -101,3 +101,10 @@ If given another two hours, I would:
 1. Implement a comprehensive input validation framework (e.g., handling extreme quantities or null coupon codes cleanly).
 2. Wire up a Swagger/OpenAPI UI for easier testing and documentation visualization.
 3. Migrate the in-memory H2 database to a Dockerized PostgreSQL instance with Flyway migrations.
+ 
+ # #   D e c i s i o n :   A P I   R a t e   L i m i t i n g   ( R e s i l i e n c e 4 j )  
+ * * C o n t e x t : * *   E - c o m m e r c e   c h e c k o u t   e n d p o i n t s   a r e   p r i m e   t a r g e t s   f o r   b r u t e - f o r c e   s c r i p t i n g   a n d   D D O S   a t t a c k s .  
+ * * C h o i c e : * *   I m p l e m e n t e d   a p p l i c a t i o n - l e v e l   r a t e   l i m i t i n g   u s i n g   R e s i l i e n c e 4 j   a n d   S p r i n g   A O P   d i r e c t l y   o n   t h e   C h e c k o u t   C o n t r o l l e r .  
+ * * W h y : * *   W h i l e   u s u a l l y   h a n d l e d   b y   a n   A P I   G a t e w a y ,   a d d i n g   i t   t o   t h e   a p p l i c a t i o n   l o g i c   d e m o n s t r a t e s   d e f e n s i v e   p r o g r a m m i n g   a n d   p r o t e c t s   t h e   d a t a b a s e   c o n n e c t i o n   p o o l   f r o m   m a l i c i o u s   c h e c k o u t   s p a m .  
+ * * C o n s e q u e n c e s : * *   I f   t h e   l i m i t   ( 5   r e q u e s t s   p e r   s e c o n d )   i s   b r e a c h e d ,   t h e   f a l l b a c k   m e t h o d   i n s t a n t l y   r e t u r n s   a n   R F C - 7 8 0 7   c o m p l i a n t   \ 4 2 9   T o o   M a n y   R e q u e s t s \   e r r o r   w i t h o u t   h i t t i n g   t h e   d a t a b a s e .  
+ 
